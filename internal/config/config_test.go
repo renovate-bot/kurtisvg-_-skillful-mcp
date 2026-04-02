@@ -1,0 +1,223 @@
+package config
+
+import (
+	"os"
+	"path/filepath"
+	"testing"
+)
+
+func writeTestConfig(t *testing.T, content string) string {
+	t.Helper()
+	path := filepath.Join(t.TempDir(), "mcp.json")
+	if err := os.WriteFile(path, []byte(content), 0644); err != nil {
+		t.Fatal(err)
+	}
+	return path
+}
+
+func TestLoad(t *testing.T) {
+	tests := []struct {
+		name    string
+		json    string
+		wantErr bool
+	}{
+		{
+			name: "valid stdio server",
+			json: `{"mcpServers":{"fs":{"command":"npx","args":["-y","server"]}}}`,
+		},
+		{
+			name: "valid http server",
+			json: `{"mcpServers":{"api":{"type":"http","url":"https://example.com/mcp","headers":{"Authorization":"Bearer tok"}}}}`,
+		},
+		{
+			name: "valid sse server",
+			json: `{"mcpServers":{"api":{"type":"sse","url":"https://example.com/sse"}}}`,
+		},
+		{
+			name: "mixed stdio and http",
+			json: `{"mcpServers":{"fs":{"command":"npx","args":[]},"api":{"type":"http","url":"https://example.com"}}}`,
+		},
+		{
+			name: "empty mcpServers",
+			json: `{"mcpServers":{}}`,
+		},
+		{
+			name:    "malformed json",
+			json:    `{not json`,
+			wantErr: true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			path := writeTestConfig(t, tt.json)
+			cfg, err := Load(path)
+			if tt.wantErr {
+				if err == nil {
+					t.Fatal("expected error, got nil")
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+			if cfg == nil {
+				t.Fatal("expected non-nil config")
+			}
+		})
+	}
+}
+
+func TestLoadNonexistentFile(t *testing.T) {
+	_, err := Load("/nonexistent/path/mcp.json")
+	if err == nil {
+		t.Fatal("expected error for nonexistent file")
+	}
+}
+
+func TestTransportType(t *testing.T) {
+	tests := []struct {
+		name     string
+		typeVal  string
+		expected TransportType
+		wantErr  bool
+	}{
+		{"empty defaults to stdio", "", TransportSTDIO, false},
+		{"explicit stdio", "stdio", TransportSTDIO, false},
+		{"explicit http", "http", TransportHTTP, false},
+		{"explicit sse", "sse", TransportSSE, false},
+		{"unknown type errors", "grpc", "", true},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			s := &ServerConfig{Type: tt.typeVal}
+			got, err := s.TransportType()
+			if tt.wantErr {
+				if err == nil {
+					t.Errorf("expected error for type %q", tt.typeVal)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+			if got != tt.expected {
+				t.Errorf("got %q, want %q", got, tt.expected)
+			}
+		})
+	}
+}
+
+func TestValidate(t *testing.T) {
+	tests := []struct {
+		name    string
+		json    string
+		wantErr bool
+	}{
+		{
+			name: "valid stdio",
+			json: `{"mcpServers":{"fs":{"command":"npx"}}}`,
+		},
+		{
+			name: "valid http",
+			json: `{"mcpServers":{"api":{"type":"http","url":"https://example.com"}}}`,
+		},
+		{
+			name: "empty servers is valid",
+			json: `{"mcpServers":{}}`,
+		},
+		{
+			name:    "stdio missing command",
+			json:    `{"mcpServers":{"fs":{}}}`,
+			wantErr: true,
+		},
+		{
+			name:    "http missing url",
+			json:    `{"mcpServers":{"api":{"type":"http"}}}`,
+			wantErr: true,
+		},
+		{
+			name:    "sse missing url",
+			json:    `{"mcpServers":{"api":{"type":"sse"}}}`,
+			wantErr: true,
+		},
+		{
+			name:    "unknown transport type",
+			json:    `{"mcpServers":{"api":{"type":"grpc"}}}`,
+			wantErr: true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			path := writeTestConfig(t, tt.json)
+			cfg, err := Load(path)
+			if err != nil {
+				t.Fatalf("load error: %v", err)
+			}
+			err = cfg.Validate()
+			if tt.wantErr && err == nil {
+				t.Fatal("expected validation error, got nil")
+			}
+			if !tt.wantErr && err != nil {
+				t.Fatalf("unexpected validation error: %v", err)
+			}
+		})
+	}
+}
+
+func TestLoadedFieldValues(t *testing.T) {
+	json := `{
+		"mcpServers": {
+			"fs": {
+				"command": "npx",
+				"args": ["-y", "server"],
+				"env": {"DEBUG": "true"}
+			},
+			"api": {
+				"type": "http",
+				"url": "https://example.com/mcp",
+				"headers": {"Authorization": "Bearer tok"}
+			}
+		}
+	}`
+	path := writeTestConfig(t, json)
+	cfg, err := Load(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Check STDIO server fields
+	fs, ok := cfg.MCPServers["fs"]
+	if !ok {
+		t.Fatal("missing 'fs' server")
+	}
+	if fs.Command != "npx" {
+		t.Errorf("fs.Command = %q, want 'npx'", fs.Command)
+	}
+	if len(fs.Args) != 2 || fs.Args[0] != "-y" || fs.Args[1] != "server" {
+		t.Errorf("fs.Args = %v, want [-y server]", fs.Args)
+	}
+	if fs.Env["DEBUG"] != "true" {
+		t.Errorf("fs.Env[DEBUG] = %q, want 'true'", fs.Env["DEBUG"])
+	}
+	if tt, err := fs.TransportType(); err != nil || tt != TransportSTDIO {
+		t.Errorf("fs.TransportType() = %q, %v; want stdio", tt, err)
+	}
+
+	// Check HTTP server fields
+	api, ok := cfg.MCPServers["api"]
+	if !ok {
+		t.Fatal("missing 'api' server")
+	}
+	if api.URL != "https://example.com/mcp" {
+		t.Errorf("api.URL = %q, want 'https://example.com/mcp'", api.URL)
+	}
+	if api.Headers["Authorization"] != "Bearer tok" {
+		t.Errorf("api.Headers[Authorization] = %q, want 'Bearer tok'", api.Headers["Authorization"])
+	}
+	if tt, err := api.TransportType(); err != nil || tt != TransportHTTP {
+		t.Errorf("api.TransportType() = %q, %v; want http", tt, err)
+	}
+}

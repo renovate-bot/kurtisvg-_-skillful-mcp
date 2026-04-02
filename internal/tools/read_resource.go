@@ -1,0 +1,43 @@
+package tools
+
+import (
+	"context"
+
+	"github.com/modelcontextprotocol/go-sdk/mcp"
+	"skillful-mcp/internal/clientmanager"
+)
+
+type readResourceInput struct {
+	SkillName   string `json:"skill_name" jsonschema:"name of the skill that owns the resource"`
+	ResourceURI string `json:"resource_uri" jsonschema:"URI of the resource to read"`
+}
+
+func RegisterReadResource(s *mcp.Server, mgr *clientmanager.Manager) {
+	mcp.AddTool(s, &mcp.Tool{
+		Name:        "read_resource",
+		Description: "Read a resource from a specific skill",
+	}, func(ctx context.Context, req *mcp.CallToolRequest, input readResourceInput) (*mcp.CallToolResult, any, error) {
+		session, err := mgr.GetSession(input.SkillName)
+		if err != nil {
+			result := &mcp.CallToolResult{}
+			result.SetError(err)
+			return result, nil, nil
+		}
+
+		readResult, err := session.ReadResource(ctx, &mcp.ReadResourceParams{
+			URI: input.ResourceURI,
+		})
+		if err != nil {
+			result := &mcp.CallToolResult{}
+			result.SetError(err)
+			return result, nil, nil
+		}
+
+		var content []mcp.Content
+		for _, rc := range readResult.Contents {
+			content = append(content, &mcp.EmbeddedResource{Resource: rc})
+		}
+
+		return &mcp.CallToolResult{Content: content}, nil, nil
+	})
+}
