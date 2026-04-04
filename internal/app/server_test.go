@@ -1,4 +1,4 @@
-package server_test
+package app_test
 
 import (
 	"context"
@@ -6,8 +6,8 @@ import (
 	"strings"
 	"testing"
 
+	"skillful-mcp/internal/app"
 	"skillful-mcp/internal/mcpserver"
-	"skillful-mcp/internal/server"
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 )
@@ -51,14 +51,30 @@ func startDownstream(t *testing.T, ctx context.Context, tools []mcp.Tool, resour
 	return session
 }
 
-func TestE2EMultipleSkills(t *testing.T) {
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
+// connectTestClient creates an app server backed by the given manager, connects
+// a test client, and returns the session.
+func connectTestClient(t *testing.T, ctx context.Context, mgr *mcpserver.Manager) *mcp.ClientSession {
+	t.Helper()
 
-	// Set up two downstream servers with different tools and resources.
+	upstream := app.NewServer(mgr)
+	serverT, clientT := mcp.NewInMemoryTransports()
+	go func() { _ = upstream.Run(ctx, serverT) }()
+
+	client := mcp.NewClient(&mcp.Implementation{Name: "e2e-client"}, nil)
+	session, err := client.Connect(ctx, clientT, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return session
+}
+
+func TestE2EMultipleSkills(t *testing.T) {
+	t.Parallel()
+	ctx := t.Context()
+
 	dbSession := startDownstream(t, ctx,
 		[]mcp.Tool{
-			{Name: "query", Description: "Run a SQL query"},
+			{Name: "execute_sql", Description: "Run a SQL query"},
 			{Name: "list_tables", Description: "List database tables"},
 		},
 		nil,
@@ -78,18 +94,8 @@ func TestE2EMultipleSkills(t *testing.T) {
 	})
 	defer mgr.Close()
 
-	// Create the upstream server and connect a test client.
-	upstream := server.NewServer(mgr)
-	serverT, clientT := mcp.NewInMemoryTransports()
-	go func() { _ = upstream.Run(ctx, serverT) }()
+	session := connectTestClient(t, ctx, mgr)
 
-	client := mcp.NewClient(&mcp.Implementation{Name: "e2e-client"}, nil)
-	session, err := client.Connect(ctx, clientT, nil)
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	// --- list_skills: should return both skills sorted ---
 	t.Run("list_skills", func(t *testing.T) {
 		result, err := session.CallTool(ctx, &mcp.CallToolParams{Name: "list_skills"})
 		if err != nil {
@@ -109,7 +115,6 @@ func TestE2EMultipleSkills(t *testing.T) {
 		}
 	})
 
-	// --- use_skill database: should list 2 tools, no resources ---
 	t.Run("use_skill_database", func(t *testing.T) {
 		result, err := session.CallTool(ctx, &mcp.CallToolParams{
 			Name:      "use_skill",
@@ -138,15 +143,14 @@ func TestE2EMultipleSkills(t *testing.T) {
 		for _, tool := range info.Tools {
 			toolNames[tool.Name] = true
 		}
-		if !toolNames["query"] || !toolNames["list_tables"] {
-			t.Errorf("expected query and list_tables, got %v", info.Tools)
+		if !toolNames["execute_sql"] || !toolNames["list_tables"] {
+			t.Errorf("expected execute_sql and list_tables, got %v", info.Tools)
 		}
 		if len(info.Resources) != 0 {
 			t.Errorf("expected 0 resources, got %d", len(info.Resources))
 		}
 	})
 
-	// --- use_skill filesystem: should list 1 tool and 1 resource ---
 	t.Run("use_skill_filesystem", func(t *testing.T) {
 		result, err := session.CallTool(ctx, &mcp.CallToolParams{
 			Name:      "use_skill",
@@ -172,7 +176,6 @@ func TestE2EMultipleSkills(t *testing.T) {
 		}
 	})
 
-	// --- read_resource from filesystem ---
 	t.Run("read_resource", func(t *testing.T) {
 		result, err := session.CallTool(ctx, &mcp.CallToolParams{
 			Name: "read_resource",
@@ -193,7 +196,6 @@ func TestE2EMultipleSkills(t *testing.T) {
 		}
 	})
 
-	// --- execute_code: basic math ---
 	t.Run("execute_code_math", func(t *testing.T) {
 		result, err := session.CallTool(ctx, &mcp.CallToolParams{
 			Name:      "execute_code",
@@ -208,12 +210,10 @@ func TestE2EMultipleSkills(t *testing.T) {
 		}
 	})
 
-	// --- execute_code: call a single downstream tool by name ---
 	t.Run("execute_code_call_tool", func(t *testing.T) {
-		code := `query(sql="SELECT 1")`
 		result, err := session.CallTool(ctx, &mcp.CallToolParams{
 			Name:      "execute_code",
-			Arguments: map[string]any{"code": code},
+			Arguments: map[string]any{"code": `execute_sql(sql="SELECT 1")`},
 		})
 		if err != nil {
 			t.Fatal(err)
@@ -223,13 +223,12 @@ func TestE2EMultipleSkills(t *testing.T) {
 			t.Fatalf("execute_code returned error: %s", tc.Text)
 		}
 		tc := result.Content[0].(*mcp.TextContent)
-		// The downstream echoes back {"tool":"query","args":{"sql":"SELECT 1"}}
 		var resp map[string]any
 		if err := json.Unmarshal([]byte(tc.Text), &resp); err != nil {
 			t.Fatalf("failed to parse response %q: %v", tc.Text, err)
 		}
-		if resp["tool"] != "query" {
-			t.Errorf("tool = %v, want 'query'", resp["tool"])
+		if resp["tool"] != "execute_sql" {
+			t.Errorf("tool = %v, want 'execute_sql'", resp["tool"])
 		}
 		args := resp["args"].(map[string]any)
 		if args["sql"] != "SELECT 1" {
@@ -237,10 +236,9 @@ func TestE2EMultipleSkills(t *testing.T) {
 		}
 	})
 
-	// --- execute_code: call tools across multiple skills ---
 	t.Run("execute_code_multi_tool", func(t *testing.T) {
 		code := `
-a = query(sql="SELECT 1")
+a = execute_sql(sql="SELECT 1")
 b = read_file(path="/tmp/test.txt")
 a + " | " + b
 `
@@ -267,15 +265,14 @@ a + " | " + b
 		if err := json.Unmarshal([]byte(parts[1]), &resp2); err != nil {
 			t.Fatal(err)
 		}
-		if resp1["tool"] != "query" {
-			t.Errorf("first tool = %v, want 'query'", resp1["tool"])
+		if resp1["tool"] != "execute_sql" {
+			t.Errorf("first tool = %v, want 'execute_sql'", resp1["tool"])
 		}
 		if resp2["tool"] != "read_file" {
 			t.Errorf("second tool = %v, want 'read_file'", resp2["tool"])
 		}
 	})
 
-	// --- use_skill with unknown skill returns error ---
 	t.Run("use_skill_unknown", func(t *testing.T) {
 		result, err := session.CallTool(ctx, &mcp.CallToolParams{
 			Name:      "use_skill",
@@ -291,16 +288,15 @@ a + " | " + b
 }
 
 func TestE2EPositionalArgs(t *testing.T) {
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
+	t.Parallel()
+	ctx := t.Context()
 
-	// Create a downstream with a typed input schema so positional args can map.
 	type QueryInput struct {
 		SQL string `json:"sql" jsonschema:"the SQL query"`
 	}
 	ds := mcp.NewServer(&mcp.Implementation{Name: "typed-downstream"}, nil)
-	mcp.AddTool(ds, &mcp.Tool{Name: "query", Description: "Run a SQL query"}, func(ctx context.Context, req *mcp.CallToolRequest, input QueryInput) (*mcp.CallToolResult, any, error) {
-		resp := map[string]any{"tool": "query", "sql": input.SQL}
+	mcp.AddTool(ds, &mcp.Tool{Name: "execute_sql", Description: "Run a SQL query"}, func(ctx context.Context, req *mcp.CallToolRequest, input QueryInput) (*mcp.CallToolResult, any, error) {
+		resp := map[string]any{"tool": "execute_sql", "sql": input.SQL}
 		data, _ := json.Marshal(resp)
 		return &mcp.CallToolResult{
 			Content: []mcp.Content{&mcp.TextContent{Text: string(data)}},
@@ -318,20 +314,12 @@ func TestE2EPositionalArgs(t *testing.T) {
 	mgr := mcpserver.NewManagerFromServers(map[string]*mcpserver.Server{"db": mcpserver.NewServerFromSession(dsSession)})
 	defer mgr.Close()
 
-	upstream := server.NewServer(mgr)
-	usServerT, usClientT := mcp.NewInMemoryTransports()
-	go func() { _ = upstream.Run(ctx, usServerT) }()
-	usClient := mcp.NewClient(&mcp.Implementation{Name: "test"}, nil)
-	session, err := usClient.Connect(ctx, usClientT, nil)
-	if err != nil {
-		t.Fatal(err)
-	}
+	session := connectTestClient(t, ctx, mgr)
 
-	// Call with positional arg: query("SELECT 1")
 	t.Run("positional_arg", func(t *testing.T) {
 		result, err := session.CallTool(ctx, &mcp.CallToolParams{
 			Name:      "execute_code",
-			Arguments: map[string]any{"code": `query("SELECT 1")`},
+			Arguments: map[string]any{"code": `execute_sql("SELECT 1")`},
 		})
 		if err != nil {
 			t.Fatal(err)
@@ -350,11 +338,10 @@ func TestE2EPositionalArgs(t *testing.T) {
 		}
 	})
 
-	// Call with kwarg still works: query(sql="SELECT 2")
 	t.Run("keyword_arg", func(t *testing.T) {
 		result, err := session.CallTool(ctx, &mcp.CallToolParams{
 			Name:      "execute_code",
-			Arguments: map[string]any{"code": `query(sql="SELECT 2")`},
+			Arguments: map[string]any{"code": `execute_sql(sql="SELECT 2")`},
 		})
 		if err != nil {
 			t.Fatal(err)
@@ -375,45 +362,30 @@ func TestE2EPositionalArgs(t *testing.T) {
 }
 
 func TestE2EToolNameConflict(t *testing.T) {
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
+	t.Parallel()
+	ctx := t.Context()
 
-	// Both skills have a tool named "search".
-	skill1 := startDownstream(t, ctx,
-		[]mcp.Tool{{Name: "search", Description: "Search skill1"}},
-		nil,
-	)
-	skill2 := startDownstream(t, ctx,
-		[]mcp.Tool{{Name: "search", Description: "Search skill2"}},
-		nil,
-	)
-	// "unique_tool" only exists in skill1 — should not be prefixed.
-	skill1unique := startDownstream(t, ctx,
+	// Both skills have a tool named "search", plus alpha has "unique_tool".
+	alpha := startDownstream(t, ctx,
 		[]mcp.Tool{
 			{Name: "search", Description: "Search alpha"},
 			{Name: "unique_tool", Description: "Only in alpha"},
 		},
 		nil,
 	)
-	_ = skill1
-	_ = skill2
+	beta := startDownstream(t, ctx,
+		[]mcp.Tool{{Name: "search", Description: "Search beta"}},
+		nil,
+	)
 
 	mgr := mcpserver.NewManagerFromServers(map[string]*mcpserver.Server{
-		"alpha": mcpserver.NewServerFromSession(skill1unique),
-		"beta":  mcpserver.NewServerFromSession(skill2),
+		"alpha": mcpserver.NewServerFromSession(alpha),
+		"beta":  mcpserver.NewServerFromSession(beta),
 	})
 	defer mgr.Close()
 
-	upstream := server.NewServer(mgr)
-	serverT, clientT := mcp.NewInMemoryTransports()
-	go func() { _ = upstream.Run(ctx, serverT) }()
-	usClient := mcp.NewClient(&mcp.Implementation{Name: "test"}, nil)
-	session, err := usClient.Connect(ctx, clientT, nil)
-	if err != nil {
-		t.Fatal(err)
-	}
+	session := connectTestClient(t, ctx, mgr)
 
-	// use_skill should return prefixed names for "search" but not for "unique_tool".
 	t.Run("use_skill_shows_resolved_names", func(t *testing.T) {
 		result, err := session.CallTool(ctx, &mcp.CallToolParams{
 			Name:      "use_skill",
@@ -445,7 +417,6 @@ func TestE2EToolNameConflict(t *testing.T) {
 		}
 	})
 
-	// execute_code should use the prefixed name.
 	t.Run("execute_code_prefixed_name", func(t *testing.T) {
 		result, err := session.CallTool(ctx, &mcp.CallToolParams{
 			Name:      "execute_code",
@@ -468,7 +439,6 @@ func TestE2EToolNameConflict(t *testing.T) {
 		}
 	})
 
-	// Unprefixed unique tool still works.
 	t.Run("execute_code_unique_name", func(t *testing.T) {
 		result, err := session.CallTool(ctx, &mcp.CallToolParams{
 			Name:      "execute_code",
