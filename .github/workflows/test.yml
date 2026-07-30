@@ -31,10 +31,10 @@ jobs:
               issue_number: context.issue.number,
               name: 'tests: run'
             });
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
         with:
           ref: ${{ github.event.pull_request.head.sha || github.sha }}
-      - uses: actions/setup-go@v6
+      - uses: actions/setup-go@v7
         with:
           go-version: "1.26.1"
       - name: Build
@@ -46,10 +46,10 @@ jobs:
     if: "github.event.action != 'labeled' || github.event.label.name == 'tests: run'"
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/setup-go@v6
+      - uses: actions/setup-go@v7
         with:
           go-version: "1.26.1"
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
         with:
           ref: ${{ github.event.pull_request.head.sha || github.sha }}
       - name: Verify go mod tidy
