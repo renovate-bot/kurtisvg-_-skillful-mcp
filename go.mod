@@ -1,6 +1,6 @@
 module github.com/kurtisvg/skillful-mcp
 
-go 1.26.1
+go 1.27.0
 
 require (
 	github.com/ewhauser/gomonty v0.0.14
